@@ -900,9 +900,11 @@ A **publisher identity** is the secp256k1 key that signs feed updates and SOCs f
 |---|---|---|---|
 | `app-scoped` | A dedicated key per origin, derived from the user's master secret. Never funded, never used for transactions. | No | RECOMMENDED; the default |
 | `bee-wallet` | The Swarm node's own wallet key. | Yes: every origin using it shares the address | OPTIONAL |
-| `ethereum-wallet` | One of the user's Ethereum accounts whose private key the implementation holds. Accounts whose key lives elsewhere (hardware wallets, remote signers, smart accounts) cannot be used. | Yes: it is the user's public wallet address | OPTIONAL |
+| `ethereum-wallet` | One of the user's Ethereum accounts whose private key the implementation holds. Accounts whose key lives elsewhere (hardware wallets, remote signers, smart accounts) cannot be used. | Yes: it is the user's public wallet address | OPTIONAL; contested, see below |
 
 Implementations MUST support at least one of `app-scoped` and `bee-wallet`, and MUST list every supported mode in `swarm_getCapabilities().publisherIdentityModes`. When offering a linkable mode, the consent UI SHOULD say that the identity is shared across sites.
+
+> **Contested: `ethereum-wallet`.** This mode is under discussion and may be removed from this specification. Swarm signs a single-owner chunk the way a wallet signs a `personal_sign` message, so a wallet account that owns feeds can be made to sign a feed update by any dApp that gets it to `personal_sign` 32 bytes, which look like gibberish to the user. That hands the dApp the user's feeds. See [Wallet Keys as Publisher Identities](#wallet-keys-as-publisher-identities). Applications that use the mode should be prepared for it to go away.
 
 #### Several identities per origin
 
@@ -1095,7 +1097,7 @@ In decentralized web browsers, all content from IPFS, Swarm, ENS, etc. is typica
 
 ### Why app-scoped feed identities?
 
-Without app-scoped identities, any dApp with feed permission could create feeds signed by the user's main wallet key — making feeds from different dApps indistinguishable and creating impersonation risks. App-scoped keys (derived per origin from the user's master secret) provide cryptographic isolation: each dApp's feeds are signed by a unique key that the dApp cannot extract. The linkable modes stay available for applications that want a portable identity, with the user's consent.
+Without app-scoped identities, any dApp with feed permission could create feeds signed by the user's main wallet key — making feeds from different dApps indistinguishable and creating impersonation risks. App-scoped keys (derived per origin from the user's master secret) provide cryptographic isolation: each dApp's feeds are signed by a unique key that the dApp cannot extract. The linkable modes stay available for applications that want a portable identity, with the user's consent, though using a wallet account is contested (see [Wallet Keys as Publisher Identities](#wallet-keys-as-publisher-identities)).
 
 ### Why derive app-scoped keys from the recovery phrase with a fixed recipe?
 
@@ -1208,6 +1210,15 @@ Publisher identities involve signing keys. Implementations MUST ensure that:
 - Private key material is never exposed to the page context.
 - App-scoped key derivation is deterministic (the same origin and identity number always produce the same key) but not reversible (the page cannot derive the master secret, or another origin's key, from its own).
 - Signing occurs in a trusted context (main process or secure enclave), never in the renderer or page context.
+
+### Wallet Keys as Publisher Identities
+
+Bee signs a single-owner chunk as an [EIP-191](https://eips.ethereum.org/EIPS/eip-191) "Ethereum Signed Message" over the 32-byte digest `keccak256(identifier ‖ address of the inner content-addressed chunk)` (Bee's `pkg/soc` and `pkg/crypto`). That is byte for byte what a wallet produces for a `personal_sign` of those 32 bytes. When a user's wallet account is also a feed owner (the `ethereum-wallet` mode):
+
+- any dApp that obtains a `personal_sign` of a chosen 32-byte value from that account — a value that looks like gibberish to the user — holds a valid single-owner chunk signature, and can publish, from anywhere, the next entry of any feed the account owns, taking the feed over for readers that follow its latest entry;
+- the provider cannot prevent it, because the same key also lives in the user's other wallets (any wallet restored from the same recovery phrase), which sign such messages on their own terms.
+
+An implementation that offers the mode SHOULD always ask the user before a `personal_sign` of exactly 32 bytes, never auto-approve one, and warn that it can authorize a Swarm feed update. Because that protects only the implementation's own wallet, the mode is contested and may be removed from this specification. A future revision could bring wallet-owned feeds back with a signature that a `personal_sign` cannot produce, which needs a change to how Swarm signs single-owner chunks. Until then, the safe choice is a publisher identity dedicated to Swarm, which signs nothing for pages.
 
 ### Linkable Identities
 
@@ -1604,6 +1615,7 @@ assert(soc.owner === owner);
 
 Where Freedom does not yet match this draft, the work is tracked in its issue tracker:
 
+- Freedom's current releases offer the `ethereum-wallet` mode. Its next core, which is being migrated to Rust, drops the mode because of the takeover risk in [Wallet Keys as Publisher Identities](#wallet-keys-as-publisher-identities), and always asks before a 32-byte `personal_sign`.
 - Permission manifests are read from `freedom-manifest.json` (schema `freedom-manifest/1`); reading `swarm-manifest.json` is [#1159](https://github.com/solardev-xyz/freedom-browser/issues/1159).
 - App-scoped keys are numbered by a stored counter, not derived with the recipe above, so they are not restorable from the phrase alone ([#1155](https://github.com/solardev-xyz/freedom-browser/issues/1155)).
 - `maxDataBytes` is not yet enforced on `swarm_writeFeedEntry` ([#1053](https://github.com/solardev-xyz/freedom-browser/issues/1053)).
