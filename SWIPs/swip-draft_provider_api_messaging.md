@@ -20,8 +20,8 @@ otherwise entirely request/response.
 
 ## Abstract
 
-The core Swarm Provider API specifies fifteen request/response RPC methods and
-two lifecycle events (`connect`, `disconnect`). It has no way for a web
+The core Swarm Provider API specifies request/response RPC methods and two
+lifecycle events (`connect`, `disconnect`). It has no way for a web
 application to *receive* asynchronous data: every method resolves once, and the
 only push signals concern the connection itself. Real-time applications —
 collaborative editors, chat, presence, live dashboards — need a channel over
@@ -31,15 +31,16 @@ This extension adds that channel. It specifies:
 
 - **`swarm_subscribe` / `swarm_unsubscribe`** — open and close a long-lived
   subscription to a GSOC address (topic broadcast) or a PSS topic
-  (point-to-point inbox). Delivery is via a new **`message`** event, following
-  the subscription-id + event pattern established by
-  [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193)'s `eth_subscribe`.
+  (point-to-point inbox). Delivery is via a new **`message`** event, borrowing
+  the subscription-id + event pattern of
+  [EIP-1193](https://eips.ethereum.org/EIPS/eip-1193)'s `eth_subscribe` (with
+  a flatter envelope; see [Events](#events)).
 - **`swarm_sendPss`** — send an encrypted point-to-point message to a recipient
   identified by their PSS public key.
 - **`swarm_sendGsoc`** — broadcast a message on a topic that any subscriber to
   the derived GSOC address receives.
-- **`swarm_getMessagingIdentity`** — disclose this origin's PSS public key and
-  routing target, so peers can address messages to it.
+- **`swarm_getMessagingIdentity`** — disclose the PSS public key and routing
+  target that peers use to address messages to this origin.
 
 PSS and GSOC are existing Swarm/Bee primitives; this extension does not define
 them, only their exposure at the provider boundary with consent and
@@ -83,23 +84,24 @@ Identical to the core specification, plus:
 - **Hide protocol mechanics.** DApps address a *topic* or a *recipient key*; the
   provider handles trojan construction, neighborhood targeting, GSOC owner
   mining, nonce mining, encryption, and the receive pipeline.
-- **Tolerate an unreliable substrate honestly.** The API surfaces best-effort,
-  unordered, at-least-once delivery as such and does not pretend otherwise.
+- **Tolerate an unreliable substrate honestly.** The API surfaces best-effort
+  delivery — messages may be lost, reordered or duplicated — as such and does
+  not pretend otherwise.
 
 ## Specification
 
 This document is an **extension**. It adds methods, one event, error reasons,
-capability fields, and one permission tier to the core Swarm Provider API. It
-changes none of the existing method semantics. An implementation MAY conform to
-the core specification without this extension; an implementation of this
-extension MUST also conform to the core specification.
+capability fields, a permission tier and a permission manifest capability to
+the core Swarm Provider API. It changes none of the existing method semantics.
+An implementation MAY conform to the core specification without this
+extension; an implementation of this extension MUST also conform to the core
+specification.
 
 ### Feature Detection
 
 Because this extension is optional, dApps MUST NOT assume its presence from the
-core `specVersion` alone. The core `swarm_getCapabilities` result is extended
-with a `features` array; an implementation of this extension MUST include the
-string `"messaging"` in it:
+core `specVersion` alone. An implementation of this extension MUST include the
+string `"messaging"` in the core `swarm_getCapabilities().features` array:
 
 ```javascript
 const caps = await window.swarm.getCapabilities()
@@ -109,9 +111,10 @@ if (caps.features?.includes('messaging')) {
 ```
 
 `swarm_getCapabilities` is additionally extended with messaging limits (see
-[Limits](#limits)). Both `features` and the new limit fields MUST be available
-before `swarm_requestAccess` — the core spec makes `swarm_getCapabilities`
-permission-free, and these are static capability facts, not user data.
+[Limits](#limits)). Both the feature string and the limit fields MUST be
+available before `swarm_requestAccess` — the core spec makes
+`swarm_getCapabilities` permission-free, and these are static capability facts,
+not user data.
 
 ### Convenience Methods
 
@@ -119,11 +122,11 @@ Implementations of this extension MUST expose these convenience wrappers, in
 addition to the core set:
 
 ```javascript
-window.swarm.getMessagingIdentity()                        // swarm_getMessagingIdentity
-window.swarm.subscribe({ kind, topic, history })           // swarm_subscribe
-window.swarm.unsubscribe({ subscriptionId })               // swarm_unsubscribe
-window.swarm.sendPss({ topic, recipient, targets, data })  // swarm_sendPss
-window.swarm.sendGsoc({ topic, data })                     // swarm_sendGsoc
+window.swarm.getMessagingIdentity()                               // swarm_getMessagingIdentity
+window.swarm.subscribe({ kind, topic | address, history })        // swarm_subscribe
+window.swarm.unsubscribe({ subscriptionId })                      // swarm_unsubscribe
+window.swarm.sendPss({ topic, recipient, targets, data })         // swarm_sendPss
+window.swarm.sendGsoc({ topic, data })                            // swarm_sendGsoc
 ```
 
 Each MUST be equivalent to calling `window.swarm.request()` with the
@@ -135,7 +138,7 @@ This extension adds one standard event:
 
 | Event | Data | Description |
 |---|---|---|
-| `message` | `SubscriptionMessage` (below) | Emitted for each message delivered on any active subscription owned by the calling origin. |
+| `message` | `SubscriptionMessage` (below) | Emitted for each message delivered on any active subscription owned by the calling page. |
 
 **`SubscriptionMessage`:**
 
@@ -153,10 +156,16 @@ This extension adds one standard event:
 }
 ```
 
-The `message` event MUST fire only for subscriptions created by the calling
-origin (origin-scoped, same isolation as feeds and tags). An implementation MUST
-NOT deliver a message to an origin that did not open the corresponding
-subscription.
+The `message` event MUST fire only for subscriptions the receiving page
+created (origin-scoped, same isolation as feeds and tags). An implementation
+MUST NOT deliver a message to a page of a different origin than the one that
+opened the corresponding subscription, including after that tab has navigated
+elsewhere.
+
+The envelope borrows EIP-1193's subscription pattern but not its exact shape:
+EIP-1193 nests `subscription` and `result` under `data`, while here they sit at
+the top level next to `type`. Handlers written for EIP-1193 subscriptions need
+a small adapter.
 
 Consistent with EIP-1193, `swarm.on('message', handler)`,
 `swarm.removeListener('message', handler)`, and `swarm.removeAllListeners('message')`
@@ -165,30 +174,61 @@ MUST be supported.
 ### Error Format
 
 Unchanged from the core specification. This extension reuses the standard error
-codes (`4001`, `4100`, `4200`, `4900`, `-32602`, `-32603`) and adds the
-following `data.reason` values for `-32602` (Invalid Params):
+codes and adds the following `data.reason` values.
+
+**`4100`:**
+
+| Reason | Meaning |
+|---|---|
+| `messaging_not_granted` | A messaging-tier method without the messaging grant, where no prompt could acquire it. |
+
+**`4900`** (all retryable):
 
 | Reason | Applicable Methods | Meaning |
 |---|---|---|
-| `invalid_topic` | `swarm_subscribe`, `swarm_sendPss`, `swarm_sendGsoc` | Topic is missing or not a valid non-empty string / 64-char hex where hex is required. |
-| `invalid_address` | `swarm_subscribe` | An explicit GSOC `address` is not a valid 64-char hex. |
+| `node_subscription_limit` | `swarm_subscribe` | The node's aggregate receive capacity is exhausted, possibly by other origins (see below). |
+| `establish_timeout` | `swarm_subscribe` | The subscription did not establish within the implementation's bound. |
+| `subscription_cancelled` | `swarm_subscribe` | The subscription was torn down (navigation, tab close, grant revoked) before it was established. |
+
+`swarm_sendPss` and `swarm_sendGsoc` also report the core setup reasons
+(`node-stopped`, `node-not-ready`, `ultra-light-mode`, `no-usable-stamps`), as
+any write does.
+
+**`-32602`:**
+
+| Reason | Applicable Methods | Meaning |
+|---|---|---|
+| `invalid_params` | All messaging methods | Generic shape error, e.g. both or neither of `topic` and `address`, or an empty `subscriptionId`. |
+| `invalid_topic` | `swarm_subscribe`, `swarm_sendPss`, `swarm_sendGsoc` | Topic is missing, empty, too long, or contains control characters. |
+| `invalid_address` | `swarm_subscribe`, `swarm_sendGsoc` | An explicit GSOC `address` is not a valid 64-char hex (subscribe), or was supplied at all (send; see `swarm_sendGsoc`). |
 | `invalid_recipient` | `swarm_sendPss` | Recipient public key is missing or not a valid 33-byte compressed secp256k1 key (66-char hex). |
-| `invalid_target` | `swarm_sendPss` | `targets` is missing, not valid hex, or outside 2–`maxTargetDepth` whole bytes (a 1-byte target is too shallow to be stored — see [PSS mining depth](#pss-mining-depth-prefix-length)). |
+| `invalid_target` | `swarm_sendPss` | `targets` is missing, not valid hex, or outside 2–`maxTargetDepth` whole bytes (a 1-byte target is too shallow to land in the recipient's neighborhood — see [PSS mining depth](#pss-mining-depth-prefix-length)). |
 | `invalid_kind` | `swarm_subscribe` | `kind` is not `"gsoc"` or `"pss"`. |
 | `payload_too_large` | `swarm_sendPss`, `swarm_sendGsoc` | Payload exceeds `maxMessageBytes`. |
 | `invalid_payload` | `swarm_sendGsoc` | Payload is empty. A GSOC update is a single-owner chunk and bee's chunk layer rejects an empty SOC payload, so an empty broadcast cannot be expressed. (`swarm_sendPss` **does** accept an empty payload — the PSS trojan framing carries an explicit length.) |
-| `subscription_not_found` | `swarm_unsubscribe` | No active subscription with the given id for this origin. |
-| `too_many_subscriptions` | `swarm_subscribe` | The origin has reached `maxSubscriptions`. |
-| `unsupported_option` | messaging methods accepting `options` | An unrecognized option field was supplied. |
+| `too_many_subscriptions` | `swarm_subscribe` | The origin has reached `maxSubscriptions`. `data.limit` gives the cap. |
+| `rate_limited` | `swarm_subscribe`, `swarm_sendGsoc` | The origin has started too many new GSOC topics recently (see [Limits](#limits)). `data.retryAfterMs` says when to retry. |
+| `unsupported_option` | `swarm_subscribe`, messaging methods accepting `options` | An unrecognized option field was supplied, or `history: true` on an implementation without the mailbox. `data.option` names it. |
 
-A subscription whose underlying receive pipeline fails after being established
-(e.g. the node loses connectivity) has no per-subscription error signal in this
-revision — the `SubscriptionMessage` schema deliberately has no error variant,
-and normative mid-stream error signalling is deferred to a future revision (see
-[Future Work](#future-work)). Where the failure is node-wide, the core spec's
-`disconnect` event already applies. Implementations MUST document how a
-degraded or failed pipeline behaves (silent gap until recovery, automatic
-teardown, etc.) so applications can reason about liveness.
+**`-32603`:**
+
+| Reason | Applicable Methods | Meaning |
+|---|---|---|
+| `gsoc_mining_timeout` | `swarm_subscribe`, `swarm_sendGsoc` | Deriving the GSOC signer for a topic ran past the implementation's bound. |
+| `gsoc_mining_failed` | `swarm_subscribe`, `swarm_sendGsoc` | Deriving the GSOC signer failed. |
+
+**Failures after establishment.** A subscription whose underlying receive
+pipeline fails after being established (e.g. the node restarts or the
+connection to it drops) has no per-subscription error signal in this revision —
+the `SubscriptionMessage` schema deliberately has no error variant, and
+normative mid-stream error signalling is deferred to a future revision (see
+[Future Work](#future-work)). Implementations SHOULD re-establish the pipeline
+automatically, with backoff, for as long as the subscription is open; messages
+sent while it is down MAY be lost. An implementation that instead ends such a
+subscription MUST document that. Where the failure is node-wide, the core spec's
+`disconnect` event does not apply (the origin's grants are unchanged); pages
+that need liveness guarantees SHOULD pair messaging with feed reads (see
+[Delivery semantics](#delivery-semantics-normative)).
 
 ---
 
@@ -196,12 +236,12 @@ teardown, etc.) so applications can reason about liveness.
 
 #### `swarm_getMessagingIdentity`
 
-Return this origin's messaging identity — the PSS public key peers encrypt to,
-and the neighborhood-prefix target peers route toward when sending to it.
+Return the messaging identity peers use to reach this origin — the PSS public
+key they encrypt to, and the neighborhood-prefix target they route toward.
 
 Operates under the **messaging permission tier** (see [Permission Model](#permission-model)):
-the returned public key is a stable per-origin identifier, so disclosure
-requires consent, mirroring `swarm_getSigningIdentity` in the core spec.
+the returned public key is a stable identifier, so disclosure requires consent,
+mirroring `swarm_getSigningIdentity` in the core spec.
 
 **Params:** None.
 
@@ -211,7 +251,7 @@ requires consent, mirroring `swarm_getSigningIdentity` in the core spec.
 {
   pssPublicKey: string,   // 66-char hex, 33-byte compressed secp256k1 public key
   pssTarget: string,      // hex neighborhood prefix (2..maxTargetDepth bytes); peers pass it as `targets` in swarm_sendPss
-  identityMode: string    // "app-scoped" or "bee-wallet" (as in the core spec)
+  identityMode: string    // "app-scoped" if the key is this origin's own, "bee-wallet" if it is the node's
 }
 ```
 
@@ -222,10 +262,17 @@ the node is unavailable.
 **Behavior:**
 - If messaging permission has not been granted, the implementation MUST prompt
   (same tier as the first `swarm_subscribe`/`swarm_send*` call) and return on
-  approval.
+  approval. Once granted, the method does not prompt again.
 - The `pssPublicKey` MUST be stable for the lifetime of the origin's messaging
-  grant. An `app-scoped` implementation SHOULD derive it per-origin so one dApp
-  cannot present another's messaging identity.
+  grant.
+- **Per-origin or node key.** Implementations SHOULD give each origin its own
+  PSS key (`identityMode: "app-scoped"`), so one dApp cannot present, or
+  receive, another's messages. Bee and current light-node implementations
+  decrypt PSS only with the node's own key, though, so an implementation MAY
+  return the node's key (`identityMode: "bee-wallet"`), which is then the same
+  for every origin. The consequences are serious enough that such an
+  implementation MUST tell the user when it asks for the messaging grant; see
+  [Shared PSS key](#shared-pss-key).
 - Whether the PSS key is bound to the same key as `swarm_getSigningIdentity`'s
   `owner` is implementation-defined; dApps MUST NOT assume equality.
 - `pssTarget` MUST be a truncated neighborhood prefix, **at least 2 and at most
@@ -237,9 +284,10 @@ the node is unavailable.
     [Security Considerations](#security-considerations)).
   - *Lower* (deliverability): the prefix length is the number of leading bits a
     sender's trojan chunk is mined to match, and it must be **deep enough that
-    storers in the neighborhood actually keep the chunk** — a prefix shallower
-    than the network's storage depth produces chunks no reserve retains, so the
-    message is undeliverable. It also governs the receiver's pull cost. See
+    storers in the recipient's neighborhood keep the chunk** — a prefix
+    shallower than the network's storage depth produces chunks that are stored
+    in some other neighborhood, where the recipient does not look, so the
+    message is, in all likelihood, undeliverable. It also governs the receiver's pull cost. See
     [PSS mining depth](#pss-mining-depth-prefix-length).
 
 ---
@@ -255,8 +303,8 @@ Open a long-lived subscription. Incoming messages are delivered via the
 |---|---|---|---|
 | `kind` | `"gsoc" \| "pss"` | Yes | Subscription type. |
 | `topic` | `string` | Conditional | GSOC: a topic string the provider deterministically maps to a GSOC address. PSS: the topic to receive on. Required unless a raw `address` is given for GSOC. |
-| `address` | `string` | Conditional | GSOC only. A raw 64-char hex GSOC/SOC address, for interoperating with GSOCs whose address was derived elsewhere. Mutually exclusive with `topic`. |
-| `history` | `boolean` | No | PSS only. When `true`, on subscribe the provider attempts to deliver messages that arrived *before* the subscription — a **mailbox** — recovering offline messages, subject to storer retention and an implementation-defined bound (see [Delivery semantics](#delivery-semantics-normative)). Default `false` (live traffic only). Ignored for GSOC (a SOC has a single latest value, not a message backlog). |
+| `address` | `string` | Conditional | GSOC only. A raw 64-char hex GSOC/SOC address, for interoperating with GSOCs whose address was derived elsewhere. Mutually exclusive with `topic`. Refused for PSS. |
+| `history` | `boolean` | No | PSS only, OPTIONAL feature. When `true`, on subscribe the provider attempts to deliver messages that arrived *before* the subscription — a **mailbox** — recovering offline messages, subject to storer retention and an implementation-defined bound (see [Delivery semantics](#delivery-semantics-normative)). Default `false` (live traffic only). Ignored for GSOC (a SOC has a single latest value, not a message backlog). |
 | `options` | `object` | No | Reserved. Unknown fields rejected with `unsupported_option`. |
 
 **Result:**
@@ -265,16 +313,18 @@ Open a long-lived subscription. Incoming messages are delivered via the
 {
   subscriptionId: string,   // opaque id, unique within this origin's session
   kind: "gsoc" | "pss",
-  key: string               // resolved GSOC address (gsoc) or topic (pss), 64-char hex
+  key: string               // resolved GSOC address (gsoc) or topic hash (pss), 64-char hex
 }
 ```
 
 **Errors:** `4001` if the user rejects the messaging-permission prompt this call
 triggered. `4100` if the origin lacks basic connection or a prompt cannot be
 surfaced. `4900` if the node is unavailable, **or if the node's aggregate
-subscription capacity is exhausted** (see below). `-32602` for
-`invalid_kind`, `invalid_topic`, `invalid_address`, `too_many_subscriptions`,
-`unsupported_option`.
+subscription capacity is exhausted** (`node_subscription_limit`, see below), or
+the subscription did not establish (`establish_timeout`,
+`subscription_cancelled`). `-32602` for `invalid_kind`, `invalid_topic`,
+`invalid_address`, `invalid_params`, `too_many_subscriptions`, `rate_limited`,
+`unsupported_option`. `-32603` for `gsoc_mining_timeout`, `gsoc_mining_failed`.
 
 **Per-origin cap vs. node capacity — two distinct failures.**
 `too_many_subscriptions` (`-32602`) means *this origin* has reached
@@ -283,7 +333,7 @@ receive pipeline is a **node-wide** resource — an implementation typically
 bounds the number of *distinct neighborhoods* it will pull concurrently across
 **all** origins (the reference light-node implementation allows 8), and that
 pool can be exhausted by *other* origins' subscriptions. That case MUST be
-reported as `4900` with a message naming subscription capacity, NOT as
+reported as `4900` (`node_subscription_limit`), NOT as
 `too_many_subscriptions`: it is not a parameter error, the calling dApp did
 nothing wrong, and it is **retryable** — capacity frees when other
 subscriptions close. DApps SHOULD treat it like any other transient node
@@ -293,11 +343,19 @@ permanent refusal.
 **Behavior:**
 - Subscribing establishes a receive pipeline for the target neighborhood. The
   implementation is responsible for pulling and decrypting matching chunks and
-  delivering decoded payloads via the `message` event.
+  delivering decoded payloads via the `message` event. The call resolves once
+  the node has accepted the subscription; implementations MAY bound that wait
+  and fail with `establish_timeout`.
+- **History.** The mailbox is OPTIONAL. An implementation that does not offer
+  it MUST reject `history: true` with `-32602`, `data.reason =
+  "unsupported_option"` and `data.option = "history"`, so a page can tell it
+  will not receive missed messages; `history: false` or absent is always
+  accepted.
 - **GSOC topic → address derivation MUST be deterministic within an
   implementation**: any two origins passing the same `topic` to the same
   provider MUST resolve to the same address, whether subscribing or sending.
-  The derivation MUST be documented by the implementation.
+  The derivation MUST be documented by the implementation. See
+  [GSOC topic derivation](#gsoc-topic-derivation) for an example.
 - **Cross-implementation convergence is NOT guaranteed in this revision.**
   Determinism alone does not pin the address: implementations must additionally
   agree on the identifier derivation (topic → 32-byte SOC identifier), the
@@ -311,51 +369,58 @@ permanent refusal.
   **receiving only**. Sending requires the mined owner key, which only the
   topic derivation yields, so cross-provider *senders* must share the topic
   itself (see `swarm_sendGsoc` Behavior).
-- For PSS, only messages the node can decrypt (encrypted to this origin's PSS
-  key) are delivered. Undecryptable traffic in the neighborhood MUST NOT be
-  delivered.
-- The provider MUST deduplicate deliveries; the same message MUST NOT be
-  delivered twice for one subscription. (Across a resubscribe, redelivery is
-  permitted — see delivery semantics.) Note that two *sends* with
-  byte-identical payloads on the same key are indistinguishable at the
-  transport layer and MAY therefore be coalesced into a single delivery;
-  applications that need repeated identical messages observed individually
-  MUST make payloads distinct (e.g. include a sequence number or nonce).
-- Subscriptions are **origin-scoped** and **session-scoped**. They MUST be torn
-  down automatically when the page unloads (`pagehide`) and when access is
-  revoked (`disconnect`). Implementations are NOT REQUIRED to persist
-  subscriptions across page reloads.
-- Multiple subscriptions to the same key by one origin MAY be coalesced
-  internally but MUST each receive messages and MUST each be independently
-  addressable by `swarm_unsubscribe`.
+- For PSS, only messages the node can decrypt with the key
+  `swarm_getMessagingIdentity` reports for this origin are delivered.
+  Undecryptable traffic in the neighborhood MUST NOT be delivered. Where that
+  key is the node's, this includes messages other origins' peers sent to the
+  node on the same topic (see [Shared PSS key](#shared-pss-key)).
+- **Duplicates.** The same message MAY be delivered
+  more than once, also within one subscription. Implementations MAY suppress a
+  redelivery of the same chunk, but MUST NOT suppress a message only because
+  its payload equals an earlier one's: a genuine repeat (a second "ok", an
+  empty keep-alive) and a redelivery look the same at that level, and dropping
+  one would silently swallow the other. Applications that need exactly-once
+  semantics MUST carry their own message id.
+- Subscriptions are **origin-scoped** and **page-scoped**. They MUST be torn
+  down automatically when the page's document is unloaded or replaced
+  (navigation to a new document, tab close) and when the origin's messaging
+  grant or connection is revoked. Same-document navigations (fragment changes,
+  `history.pushState`) MUST NOT end them. Implementations are NOT REQUIRED to
+  persist subscriptions across page reloads.
+- Multiple subscriptions to the same key — by one origin or several — MAY be
+  coalesced internally onto one node connection, but each MUST receive
+  messages and MUST be independently addressable by `swarm_unsubscribe`.
+- Subscriptions still being established count toward `maxSubscriptions`.
 
-**Delivery semantics (normative):** Messages are **best-effort, unordered, and
-at-least-once**. Without `history`, a subscriber MAY miss messages published
-while it was not subscribed, MAY receive messages out of send order, and MAY
-(across resubscription) receive a message more than once. Applications MUST
-tolerate this. Ordering/causality and gap recovery are application concerns; the
-durable Swarm feed layer (core spec) is the appropriate substrate for
-authoritative state and catch-up, with messaging used for live propagation.
+<a id="delivery-semantics-normative"></a>**Delivery semantics (normative):** Messages are **best-effort**: a message
+MAY be lost (for example while a pipeline is re-establishing), MAY arrive out
+of send order, and MAY arrive more than once. Without `history`, a subscriber
+also misses messages published while it was not subscribed. Applications MUST tolerate this.
+Ordering/causality and gap recovery are application concerns; the durable
+Swarm feed layer (core spec) is the appropriate substrate for authoritative
+state and catch-up, with messaging used for live propagation.
 
-**With `history: true` (mailbox):** on subscribe the provider SHOULD additionally
-deliver messages that arrived before the subscription — offline delivery. This
-is **bounded and best-effort**, not a durable queue: recovery is limited by (a)
-storer **retention** — a message whose postage stamp has expired, or that has
-been evicted from neighborhood reserves, is unrecoverable; and (b) an
-**implementation-defined lookback bound** the provider MAY impose to keep the
-recovery sweep cheap. Recovered messages carry the same `message`-event shape as
-live ones and are subject to the same at-least-once/may-duplicate guarantees;
-`receivedAt` reflects when the *provider* recovered the message, not when it was
-originally sent (a sender-supplied timestamp, if wanted, is application payload).
-Whether historical messages are ordered relative to each other is
+**With `history: true` (mailbox):** an implementation that supports the mailbox
+additionally delivers, on subscribe, messages that arrived before the
+subscription — offline delivery. This is **bounded and best-effort**, not a
+durable queue: recovery is limited by (a) storer **retention** — a message
+whose postage stamp has expired, or that has been evicted from neighborhood
+reserves, is unrecoverable; and (b) an **implementation-defined lookback
+bound** the provider MAY impose to keep the recovery sweep cheap. Recovered
+messages carry the same `message`-event shape as live ones and are subject to
+the same best-effort, may-duplicate semantics; `receivedAt` reflects when the
+*provider* recovered the message, not when it was originally sent (a
+sender-supplied timestamp, if wanted, is application payload). Whether
+historical messages are ordered relative to each other is
 implementation-defined; applications needing send-order MUST carry their own
-sequence. How far back the mailbox reaches is implementation-defined and, at the
-default 2-byte prefix, is a **recent-history window** rather than the complete
-backlog (a light-node receiver sweeps a busy neighborhood bin, so a bounded
-lookback covers minutes-to-hours, not all of history). A complete backlog sweep
-would require the trojan concentrated into a sparse deep bin pulled by a
-deeply-resident receiver (see [PSS mining depth](#pss-mining-depth-prefix-length)
-for why that trade is not the default).
+sequence. How far back the mailbox reaches is implementation-defined and, at
+the default 2-byte prefix, is a **recent-history window** rather than the
+complete backlog (a light-node receiver sweeps a busy neighborhood bin, so a
+bounded lookback covers minutes-to-hours, not all of history). A complete
+backlog sweep would require the trojan concentrated into a sparse deep bin
+pulled by a deeply-resident receiver (see
+[PSS mining depth](#pss-mining-depth-prefix-length) for why that trade is not
+the default).
 
 ---
 
@@ -375,12 +440,15 @@ Close a subscription.
 { unsubscribed: true }
 ```
 
-**Errors:** `-32602` with `subscription_not_found` if no such active
-subscription exists for this origin. Unsubscribing an already-closed
-subscription MAY be treated as idempotent success or `subscription_not_found`;
-implementations SHOULD prefer idempotent success.
+**Errors:** `4100` if the origin is not connected. `-32602` (`invalid_params`)
+if `subscriptionId` is missing or not a non-empty string.
 
 **Behavior:**
+- Needs the connection grant only; never prompts.
+- **Idempotent.** The method MUST resolve `{ unsubscribed: true }` for any
+  well-formed id, including one that is already closed, never existed, or
+  belongs to another origin — and MUST answer all of these the same way, so a
+  page cannot probe for other origins' subscription ids.
 - After a successful unsubscribe, the `message` event MUST NOT fire for that
   `subscriptionId`.
 - The provider SHOULD release the underlying receive pipeline when its last
@@ -394,15 +462,15 @@ Send an encrypted point-to-point message to a recipient identified by their PSS
 public key. The message is a trojan chunk encrypted to the recipient and routed
 toward the neighborhood implied by `targets`.
 
-Operates under the **messaging send tier** (per-operation consent like publish;
-consumes a postage stamp).
+Operates under the **messaging tier**, with per-send consent like publish; each
+send consumes postage.
 
 **Params:**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `topic` | `string` | Yes | Topic the recipient subscribes on. Hashed/normalized by the provider as in Bee PSS. |
-| `recipient` | `string` | Yes | Recipient PSS public key: 66-char hex, 33-byte compressed secp256k1 (as returned by `swarm_getMessagingIdentity`). |
+| `recipient` | `string` | Yes | Recipient PSS public key: 66-char hex, 33-byte compressed secp256k1 (as returned by `swarm_getMessagingIdentity`). MAY carry a `0x` prefix. |
 | `targets` | `string` | Yes | Neighborhood prefix as hex (**2**–`maxTargetDepth` bytes) locating the recipient — the value the recipient's `swarm_getMessagingIdentity` returned as `pssTarget`, shared out of band alongside their public key. The sender's provider cannot derive this from the public key alone. The prefix length sets the trojan's mining depth (see [PSS mining depth](#pss-mining-depth-prefix-length)): it MUST be deep enough that neighborhood storers keep the chunk, and deeper targets cost more to mine but less to receive. |
 | `data` | `string \| Uint8Array \| ArrayBuffer` | Yes | Payload. Strings encoded UTF-8. MUST be ≤ `maxMessageBytes`. MAY be empty — the PSS trojan framing carries an explicit length, so a zero-byte message is well-formed (useful for pings/signals). |
 | `options` | `object` | No | Reserved. Unknown fields rejected with `unsupported_option`. |
@@ -414,8 +482,9 @@ consumes a postage stamp).
 ```
 
 **Errors:** `4001` if the user rejects a per-send prompt. `4100` if not
-connected. `4900` if node unavailable or no usable postage stamp. `-32602` for
-`invalid_topic`, `invalid_recipient`, `invalid_target`, `payload_too_large`,
+connected. `4900` if node unavailable, not ready to write, or without a usable
+postage stamp (core setup reasons). `-32602` for `invalid_topic`,
+`invalid_recipient`, `invalid_target`, `payload_too_large`,
 `unsupported_option`.
 
 **Behavior:**
@@ -430,6 +499,76 @@ connected. `4900` if node unavailable or no usable postage stamp. `-32602` for
 
 ---
 
+#### `swarm_sendGsoc`
+
+Broadcast a message on a topic. Any origin subscribed (via `swarm_subscribe`
+with `kind: "gsoc"`) to the address the topic derives to receives it.
+
+Operates under the **messaging tier**, with per-send consent like publish.
+
+**Params:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `topic` | `string` | Yes | Topic the provider deterministically maps to a GSOC address (same derivation as `swarm_subscribe`). Unlike `swarm_subscribe`, there is no raw `address` alternative — see Behavior. |
+| `data` | `string \| Uint8Array \| ArrayBuffer` | Yes | Payload. Strings encoded UTF-8. MUST be **1**..`maxMessageBytes` bytes: an empty payload is rejected with `invalid_payload` (a GSOC update is a single-owner chunk, and bee's chunk layer refuses an empty SOC payload — the provider must not sign a chunk the network will not accept). |
+| `options` | `object` | No | Reserved. Unknown fields rejected with `unsupported_option`. |
+
+**Result:**
+
+```javascript
+{
+  sent: true,
+  address: string   // 64-char hex GSOC address written to
+}
+```
+
+**Errors:** `4001` if the user rejects a per-send prompt. `4100` if not
+connected. `4900` if node unavailable, not ready to write, or without a usable
+postage stamp. `-32602` for `invalid_topic`, `invalid_address`,
+`invalid_payload`, `payload_too_large`, `rate_limited`, `unsupported_option`.
+`-32603` for `gsoc_mining_timeout`, `gsoc_mining_failed`.
+
+**Behavior:**
+- GSOC send writes a Single Owner Chunk at the derived address. The provider
+  performs any required owner mining so the chunk lands in the correct
+  neighborhood, signs it, and uploads it with an automatically-selected batch.
+  The first use of a topic mines its owner key, which can take a noticeable
+  fraction of a second; implementations MAY cache derivations, MAY bound the
+  mining time, and MAY limit how many new topics an origin starts (see
+  [Limits](#limits)).
+- **There is deliberately no raw `address` variant** (asymmetric with
+  `swarm_subscribe`, which accepts one). An `address` param MUST be rejected
+  with `invalid_address`. Writing a GSOC requires signing with the mined owner
+  key, and that key is recovered by re-running the derivation from the topic; a
+  GSOC address is a hash output (`keccak256(identifier ‖ owner)`) from which
+  neither the identifier nor the owner key can be recovered. An address alone
+  therefore carries nothing to sign with — watching an address is passive,
+  authoring at one is not. Senders interoperating across providers MUST share
+  the topic (and, until a normative derivation profile exists, use the same
+  provider implementation or agree on the derivation out of band).
+- Re-sending on the same topic writes a new update at the same address (this
+  is how a broadcast channel advances). Because delivery is best-effort,
+  subscribers MUST NOT assume they observe every update — only that they tend
+  to see recent ones. A GSOC topic is therefore a good *notification* channel
+  and a poor log. For a stream of independent updates where every value
+  matters (e.g. CRDT deltas), applications SHOULD keep the authoritative
+  updates in feeds, and use GSOC on a fixed topic (or PSS) only to carry them
+  live or to signal that new entries exist, with the feeds as the catch-up
+  path. PSS is best-effort too, so it is no substitute for durable storage
+  unless the application adds its own retransmission. Changing the topic per
+  message does not help: each topic
+  is a different address, and a subscriber receives only the addresses it
+  subscribed to, so it would have to know every future topic in advance.
+  Implementations SHOULD document their GSOC addressing so applications can
+  reason about this.
+- Unlike the core `swarm_writeSingleOwnerChunk` (signed by the origin's
+  publisher identity), GSOC uses a mined owner key derived for neighborhood
+  placement; this is why GSOC send is a distinct method rather than a use of
+  the core SOC write.
+
+---
+
 ### PSS mining depth (prefix length)
 
 A PSS message is a *trojan chunk* whose content-address is **mined** to share a
@@ -439,11 +578,15 @@ recipient's neighborhood. `L` is not a free knob; it is bounded on both sides,
 which is why this spec constrains `targets`/`pssTarget` to **2–`maxTargetDepth`
 bytes** rather than the underlying primitive's 1-byte floor.
 
-**Lower bound — storability.** Neighborhood storers keep a chunk only if it falls
-within their storage depth `d` (the proximity order at which the reserve is
-maintained). A trojan mined to `L < d` lands *outside* every neighborhood
-storer's reserve and is simply not stored — the send returns success (the chunk
-was accepted for upload) but no one retains it, so it is undeliverable. On the
+**Lower bound — landing where the recipient looks.** Every chunk is stored by
+the neighborhood its address falls in: the storers whose overlay shares at
+least the storage depth `d` leading bits with it (`d` is the proximity order at
+which reserves are maintained). Mining guarantees only `L` shared bits with the
+recipient's overlay, so a trojan mined to `L < d` lands, with probability about
+`1 − 2^(L−d)`, in some *other* neighborhood. It is stored there, but the
+recipient pulls its own neighborhood and never sees it: the send returns
+success (the chunk was accepted for upload), yet the message is, in all
+likelihood, undeliverable. On the
 public network `d` is on the order of a dozen bits and rises with network growth;
 a 1-byte (`L=8`) target is below it, which is why 1-byte targets are rejected. A
 2-byte (`L=16`) target is comfortably above `d` today and is the adopted default.
@@ -476,7 +619,8 @@ different `L` may land where the receiver is not looking. This SWIP adopts
 
 - Senders SHOULD mine `targets` to 2 bytes; receivers assume `L = 16`.
 - 2 bytes is also the hard `invalid_target` floor (below the network storage
-  depth a chunk is not retained at all); 1 byte is always rejected.
+  depth a chunk does not land where the recipient looks); 1 byte is always
+  rejected.
 - Implementations MAY mine deeper (up to `maxTargetDepth`) where sender and
   receiver privately agree, but a conforming default receiver assumes 16.
 
@@ -502,59 +646,27 @@ surface, so its normative home is arguably the core Swarm protocol
 documentation, not this extension; this SWIP fixes the provider default at 16 and
 will track any core-level decision.
 
-Broadcast a message on a topic. Any origin subscribed (via `swarm_subscribe`
-with `kind: "gsoc"`) to the address the topic derives to receives it.
+---
 
-Operates under the **messaging send tier**.
+### GSOC topic derivation
 
-**Params:**
+This section is **informative**. As explained under `swarm_subscribe`, this
+revision does not fix how a topic maps to a GSOC address; each implementation
+documents its own. As an example, Freedom Browser derives it as follows:
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `topic` | `string` | Yes | Topic the provider deterministically maps to a GSOC address (same derivation as `swarm_subscribe`). Unlike `swarm_subscribe`, there is no raw `address` alternative — see Behavior. |
-| `data` | `string \| Uint8Array \| ArrayBuffer` | Yes | Payload. Strings encoded UTF-8. MUST be **1**..`maxMessageBytes` bytes: an empty payload is rejected with `invalid_payload` (a GSOC update is a single-owner chunk, and bee's chunk layer refuses an empty SOC payload — the provider must not sign a chunk the network will not accept). |
-| `options` | `object` | No | Reserved. Unknown fields rejected with `unsupported_option`. |
-
-**Result:**
-
-```javascript
-{
-  sent: true,
-  address: string   // 64-char hex GSOC address written to
-}
+```
+identifier    = keccak256(utf8(topic))
+targetOverlay = keccak256(utf8("freedom-gsoc-v1:" + topic))
+signer        = gsocMine(targetOverlay, identifier, 12)   // bee-js; deterministic sequential search
+address       = keccak256(identifier ‖ signer.address)
 ```
 
-**Errors:** `4001` if the user rejects a per-send prompt. `4100` if not
-connected. `4900` if node unavailable or no usable postage stamp. `-32602` for
-`invalid_topic`, `invalid_payload`, `payload_too_large`, `unsupported_option`.
-
-**Behavior:**
-- GSOC send writes a Single Owner Chunk at the derived address. The provider
-  performs any required owner mining so the chunk lands in the correct
-  neighborhood, signs it, and uploads it with an automatically-selected batch.
-- **There is deliberately no raw `address` variant** (asymmetric with
-  `swarm_subscribe`, which accepts one). Writing a GSOC requires signing with
-  the mined owner key, and that key is recovered by re-running the derivation
-  from the topic; a GSOC address is a hash output
-  (`keccak256(identifier ‖ owner)`) from which neither the identifier nor the
-  owner key can be recovered. An address alone therefore carries nothing to
-  sign with — watching an address is passive, authoring at one is not. Senders
-  interoperating across providers MUST share the topic (and, until a normative
-  derivation profile exists, use the same provider implementation or agree on
-  the derivation out of band).
-- Re-sending on the same topic overwrites the SOC at that address with a newer
-  timestamp (this is how a broadcast channel advances). Because delivery is
-  at-least-once and unordered, subscribers MUST NOT assume they observe every
-  intermediate value — only that they converge on recent ones. For a stream of
-  independent updates (e.g. CRDT deltas) where every value matters, senders
-  SHOULD vary the effective address per message (e.g. include a sequence or
-  random component in the topic) so updates do not clobber one another, or use
-  PSS. Implementations SHOULD document their GSOC addressing so applications can
-  reason about this.
-- Unlike the core `swarm_writeSingleOwnerChunk` (signed by the fixed origin
-  identity), GSOC uses a mined owner key derived for neighborhood placement;
-  this is why GSOC send is a distinct method rather than a use of the core SOC
-  write.
+`gsocMine` searches keys in a fixed order until the SOC address shares 12
+leading bits with `targetOverlay`, so every participant that runs the same
+derivation on the same topic converges on the same signer and address. Any
+change to a constant here moves every existing room to a new address, which is
+why an implementation treats its derivation as frozen once shipped, and why a
+future normative profile will have to pick one derivation for everyone.
 
 ---
 
@@ -564,9 +676,21 @@ connected. `4900` if node unavailable or no usable postage stamp. `-32602` for
 
 | Limit | Recommended Default | Notes |
 |---|---|---|
-| `maxMessageBytes` | 3584 | Max PSS/GSOC payload. A Swarm chunk is 4096 bytes; PSS/GSOC framing and encryption overhead reduce the usable payload. Implementations MUST advertise the true usable maximum. |
-| `maxTargetDepth` | 3 | Max neighborhood-prefix length in bytes for PSS `targets`/`pssTarget`. The minimum is fixed at **2 bytes** (below the network storage depth chunks are not retained — see [PSS mining depth](#pss-mining-depth-prefix-length)); this limit caps the deep end (sender mining cost). |
-| `maxSubscriptions` | 32 | Max concurrent active subscriptions **per origin**. The node additionally bounds its *aggregate* receive pipelines across all origins (implementation-defined; not advertised here because it is shared state, not a per-origin promise) — exhaustion of that pool surfaces as a retryable `4900`, see `swarm_subscribe`. |
+| `maxMessageBytes` | 4000 | Max PSS/GSOC payload. A Swarm chunk is 4096 bytes; PSS/GSOC framing and encryption overhead reduce the usable payload (the reference light-node implementation reserves 96 bytes). Implementations MUST advertise the true usable maximum. |
+| `maxTargetDepth` | 3 | Max neighborhood-prefix length in bytes for PSS `targets`/`pssTarget`. The minimum is fixed at **2 bytes** (below the network storage depth a chunk does not land in the recipient's neighborhood — see [PSS mining depth](#pss-mining-depth-prefix-length)); this limit caps the deep end (sender mining cost). |
+| `maxSubscriptions` | 32 | Max concurrent active subscriptions **per origin**, including ones still being established. The node additionally bounds its *aggregate* receive pipelines across all origins (implementation-defined; not advertised here because it is shared state, not a per-origin promise) — exhaustion of that pool surfaces as a retryable `4900`, see `swarm_subscribe`. |
+
+Not reported there:
+
+- **Topics** are non-empty strings without control characters. Implementations
+  MUST accept topics of up to 256 UTF-8 bytes, and MAY reject longer ones with
+  `invalid_topic`.
+- **New GSOC topics.** Deriving a topic's GSOC signer costs CPU (it is a
+  mining search), so implementations MAY limit how many *new* topics — ones
+  that have to be mined — an origin starts per time window, across
+  `swarm_subscribe` and `swarm_sendGsoc`. Topics already derived MUST NOT
+  count. Exceeding the limit is `-32602 rate_limited` with `retryAfterMs`. (One
+  implementation allows 16 new topics per origin per 60 seconds.)
 
 Applications needing to move more than `maxMessageBytes` in one logical message
 MUST chunk at the application layer, or publish the bulk via `swarm_publishData`
@@ -574,29 +698,36 @@ and send only the resulting reference over messaging.
 
 ### Permission Model
 
-This extension adds one tier to the core permission lifecycle:
+This extension adds one tier to the core permission model:
 
-- **Messaging tier.** Acquired on first call to `swarm_getMessagingIdentity`,
-  `swarm_subscribe`, `swarm_sendPss`, or `swarm_sendGsoc`. Separate from the
-  publish and feed tiers. Rationale: messaging discloses a stable per-origin
-  public identity, opens a resource-consuming receive pipeline (the node pulls
-  from a neighborhood on the origin's behalf), and sends consume postage. Any
-  messaging method MAY trigger the grant prompt on first call; on rejection the
-  method MUST reject with `4001`.
+| Tier | Methods | Grant needed | Prompt |
+|---|---|---|---|
+| **Messaging** | `swarm_getMessagingIdentity`, `swarm_subscribe` | connection + messaging grant | the first messaging-tier call acquires the grant; then never |
+| | `swarm_sendPss`, `swarm_sendGsoc` | connection + messaging grant | the first call acquires the grant; then per send, unless auto-approve (messaging) |
+| | `swarm_unsubscribe` | connection | never |
+
+- **Messaging grant.** Separate from the publish and feed grants. Rationale:
+  messaging discloses a stable public identity, opens a resource-consuming
+  receive pipeline (the node pulls from a neighborhood on the origin's behalf),
+  and sends consume postage. Any messaging method other than
+  `swarm_unsubscribe` MAY trigger the grant prompt on first call; on rejection
+  the method MUST reject with `4001`.
 - **Send consent.** `swarm_sendPss`/`swarm_sendGsoc` MAY additionally require
   per-operation approval (like `swarm_publishData`), or fall under an origin
   auto-approve the user has enabled. Implementations MUST still enforce size
   limits and stamp checks under auto-approve, and SHOULD additionally apply a
   per-origin send rate cap there — messaging sends are cheap to issue in a
   loop and each consumes postage.
+- **Permission manifests.** The core permission manifest's `messaging`
+  capability grants the connection, the messaging grant and send auto-approval
+  in one step.
 - **Subscription resource control.** Subscriptions consume bandwidth for as long
   as they are open. Implementations MUST cap concurrent subscriptions per origin
   (`maxSubscriptions`) and SHOULD apply per-origin bandwidth accounting to the
-  receive pipeline, tighter for origins that have not been explicitly granted
-  messaging.
-- **Revocation.** On disconnect/revocation the provider MUST tear down the
-  origin's subscriptions and stop emitting `message` events for it, consistent
-  with the core spec's `disconnect` behavior.
+  receive pipeline.
+- **Revocation.** On disconnect, or when the user revokes only the messaging
+  grant, the provider MUST tear down the origin's subscriptions and stop
+  emitting `message` events for it.
 
 ### Encoding
 
@@ -616,16 +747,20 @@ request rates, and it cannot express PSS's push-only, encrypted, point-to-point
 delivery at all. A subscription is the minimal addition that unlocks the class
 of applications the core API cannot serve.
 
-### Why the EIP-1193 `message`-event shape?
+### Why an EIP-1193-style subscription?
 
 Web3 developers already know `eth_subscribe` → subscription id → `message`
-events. Reusing that shape (with `type: "swarm_subscription"`) means existing
-mental models and tooling transfer, and keeps the provider to a single streaming
-idiom rather than inventing per-method callbacks.
+events. Borrowing that pattern (with `type: "swarm_subscription"`) means
+existing mental models transfer, and keeps the provider to a single streaming
+idiom rather than inventing per-method callbacks. The envelope is flatter than
+EIP-1193's — `subscription` and `result` sit at the top level instead of under
+`data` — so code written for EIP-1193 subscriptions needs a small adapter.
+Aligning the envelope would break pages written against the deployed shape, so
+this revision documents that shape.
 
 ### Why is GSOC send a new method rather than `swarm_writeSingleOwnerChunk`?
 
-The core SOC write signs with the origin's fixed app-scoped identity at a
+The core SOC write signs with the origin's publisher identity at a
 caller-chosen identifier. GSOC requires an owner key *mined* so the resulting
 SOC address falls in a chosen neighborhood — a different owner, chosen by the
 provider, not the origin identity. Overloading the core method with a mining
@@ -651,7 +786,28 @@ of. That key's role (encryption) and possibly its derivation differ from the
 feed/SOC signing key. Exposing it explicitly via `swarm_getMessagingIdentity`
 avoids conflating the two and lets implementations choose their key management.
 
-### Why surface best-effort/unordered/at-least-once so prominently?
+### Why allow the node's own PSS key?
+
+Per-origin PSS keys are the right design, and the specification asks for them.
+But PSS decryption happens in the node, and today's nodes decrypt only with
+their own key. A provider that wants per-origin keys has to receive the raw
+trojan chunks and decrypt them itself, which current light-node interfaces do
+not offer. Forbidding the node key would leave no conforming implementation of
+PSS receive; allowing it, with a mandatory disclosure to the user and advice to
+encrypt end to end, lets applications ship now and tells them exactly what
+they are trading.
+
+### Why may duplicates reach the page?
+
+An earlier draft required providers to deduplicate deliveries. At the level a
+provider usually sees — the decrypted payload — a network redelivery and a
+genuine repeat are identical, so payload-based deduplication silently drops
+legitimate messages (a second "ok", a keep-alive ping). Applications that need
+exactly-once delivery need their own message ids anyway, because messages can
+also arrive after a resubscribe or out of order; with ids, duplicates cost
+nothing. Suppressing a redelivery of the *same chunk* remains allowed.
+
+### Why surface best-effort delivery so prominently?
 
 Because building on a false reliability assumption is the most likely way to
 misuse this API. Stating the true semantics steers applications toward
@@ -659,10 +815,18 @@ CRDT/idempotent designs (which compose perfectly with these guarantees) and
 toward using the durable feed layer for authoritative state — the intended
 architecture: **feeds for the source of truth, messaging for live propagation.**
 
+### Why must unsubscribe be idempotent?
+
+A page that unsubscribes during teardown cannot always know whether the
+provider already closed the subscription (navigation, revocation, a failed
+pipeline). An error there is noise. Answering every well-formed id the same
+way also keeps one origin from learning which subscription ids exist for
+another.
+
 ## Backwards Compatibility
 
 Purely additive. Implementations without this extension omit the messaging
-methods and the `"messaging"` feature flag; dApps detect absence via
+methods and the `"messaging"` feature string; dApps detect absence via
 `swarm_getCapabilities().features` and fall back to the feed/polling approach.
 No core method changes.
 
@@ -677,19 +841,28 @@ considerations:
   user's node pull from a neighborhood on the origin's behalf. Unbounded
   subscriptions or very shallow targets could be abused to consume bandwidth.
   Implementations MUST cap concurrent subscriptions (`maxSubscriptions`) and
-  SHOULD bound per-origin receive bandwidth, with tighter limits for
-  un-granted origins.
-- **Cross-origin identity correlation.** `pssPublicKey` is per-origin under
-  `app-scoped` derivation, but any node-global value returned to multiple
-  origins is a correlation handle. This is why `swarm_getMessagingIdentity`
-  returns a truncated `pssTarget` prefix rather than the node's full overlay
-  address: the full overlay is identical for every origin, uniquely identifies
-  the user's node, and discloses its exact network position. Even the
-  truncated prefix leaks up to `maxTargetDepth` bytes of neighborhood
-  information and is the same across origins; implementations SHOULD keep
-  `maxTargetDepth` small. Under `bee-wallet` mode the public key itself is
-  node-global; users selecting it accept cross-origin linkability, as in the
-  core spec.
+  SHOULD bound per-origin receive bandwidth.
+- **Cross-origin identity correlation.** Any node-global value returned to
+  multiple origins is a correlation handle. This is why
+  `swarm_getMessagingIdentity` returns a truncated `pssTarget` prefix rather
+  than the node's full overlay address: the full overlay is identical for every
+  origin, uniquely identifies the user's node, and discloses its exact network
+  position. Even the truncated prefix leaks up to `maxTargetDepth` bytes of
+  neighborhood information and is the same across origins; implementations
+  SHOULD keep `maxTargetDepth` small. A node-global PSS key (below) is itself
+  such a handle.
+- <a id="shared-pss-key"></a>**Shared PSS key.** When `swarm_getMessagingIdentity` returns the node's
+  key, every origin with the messaging grant shares one PSS identity, so:
+  - any such origin that subscribes to a PSS topic receives every message the
+    node decrypts on that topic, including messages a peer meant for another
+    site, and topics are plain strings that any app can know or guess;
+  - two sites the user uses can be linked through the key.
+
+  An implementation that uses the node's key MUST say so to the user when it
+  asks for the messaging grant. Applications SHOULD encrypt PSS payloads end
+  to end (for example with keys from the
+  [Encryption Key](./swip-draft_provider_api_encryption.md) extension) and use
+  topics that cannot be guessed.
 - **Metadata exposure.** PSS hides payloads but the existence and neighborhood
   of traffic is observable to the network. Subscribing to a topic reveals
   interest in that neighborhood to peers the node pulls from. Applications
@@ -704,9 +877,9 @@ considerations:
 - **Payload confidentiality.** GSOC payloads are plaintext on Swarm unless the
   application encrypts them; only PSS provides transport encryption. For a
   private collaborative session over GSOC, the application MUST encrypt payloads
-  (e.g. with a per-session key shared out of band, as the Freedom Docs
-  capability-link model already does).
-- **Duplicate/stale delivery.** At-least-once, unordered delivery means a
+  (e.g. with a per-session key shared out of band, such as a key carried in a
+  capability link).
+- **Duplicate/stale delivery.** Duplicated, unordered delivery means a
   malicious or lagging peer could replay old messages. Application-layer
   sequence/version handling (again, native to CRDTs) is required; state MUST NOT
   advance irreversibly on receipt of a single unverified message.
@@ -732,6 +905,7 @@ const { maxTargetDepth } = (await window.swarm.getCapabilities()).limits
 const id = await window.swarm.getMessagingIdentity()
 assert(/^[0-9a-f]{66}$/.test(id.pssPublicKey))   // 33-byte compressed key
 assert(/^([0-9a-f]{2})+$/.test(id.pssTarget))    // whole bytes, hex
+assert(id.pssTarget.length / 2 >= 2)              // deep enough to be stored
 assert(id.pssTarget.length / 2 <= maxTargetDepth) // truncated prefix, never the full overlay
 assert(['app-scoped', 'bee-wallet'].includes(id.identityMode))
 ```
@@ -780,7 +954,7 @@ await window.swarm.sendPss({
 // recipient's 'message' event fires with kind:'pss', decrypted payload
 ```
 
-### Mailbox (offline delivery)
+### Mailbox (offline delivery, where supported)
 
 ```javascript
 // A sender posts to a room while nobody is subscribed.
@@ -788,17 +962,23 @@ await window.swarm.sendPss({ topic: 'room:42', recipient, targets, data: 'sent w
 
 // Later, a client subscribes WITH history — and receives the earlier message.
 const seen = []
-window.swarm.on('message', (m) => { if (m.subscription === sub.subscriptionId) seen.push(m.result.data) })
-const sub = await window.swarm.subscribe({ kind: 'pss', topic: 'room:42', history: true })
-// `seen` includes messages sent before this subscription existed
-// (bounded by storer retention; see Delivery semantics).
-
-// Without history, the same subscribe would only receive messages sent
-// from now on:
-const liveOnly = await window.swarm.subscribe({ kind: 'pss', topic: 'room:42' })
+window.swarm.on('message', (m) => seen.push(m))
+let sub
+try {
+  sub = await window.swarm.subscribe({ kind: 'pss', topic: 'room:42', history: true })
+} catch (err) {
+  // An implementation without the mailbox says so instead of ignoring it.
+  assert(err.code === -32602)
+  assert(err.data.reason === 'unsupported_option')
+  assert(err.data.option === 'history')
+  sub = await window.swarm.subscribe({ kind: 'pss', topic: 'room:42' }) // live only
+}
+// With the mailbox, `seen` comes to include messages for sub.subscriptionId
+// that were sent before this subscription existed (bounded by storer
+// retention; see Delivery semantics).
 ```
 
-### Unsubscribe Stops Delivery
+### Unsubscribe Stops Delivery and Is Idempotent
 
 ```javascript
 const sub = await window.swarm.subscribe({ kind: 'gsoc', topic: 't' })
@@ -806,12 +986,9 @@ const res = await window.swarm.unsubscribe({ subscriptionId: sub.subscriptionId 
 assert(res.unsubscribed === true)
 // No further 'message' events fire for sub.subscriptionId
 
-try {
-  await window.swarm.unsubscribe({ subscriptionId: 'nonexistent' })
-} catch (err) {
-  assert(err.code === -32602)
-  assert(err.data.reason === 'subscription_not_found')
-}
+// Closing it again, or closing an id that never existed, also succeeds:
+assert((await window.swarm.unsubscribe({ subscriptionId: sub.subscriptionId })).unsubscribed === true)
+assert((await window.swarm.unsubscribe({ subscriptionId: 'nonexistent' })).unsubscribed === true)
 ```
 
 ### Payload Too Large
@@ -845,6 +1022,18 @@ const res = await window.swarm.sendPss({
 assert(res.sent === true)
 ```
 
+### No Raw Address on Send
+
+```javascript
+try {
+  await window.swarm.sendGsoc({ address: '00'.repeat(32), data: 'hi' })
+  assert.fail('should reject')
+} catch (err) {
+  assert(err.code === -32602)
+  assert(err.data.reason === 'invalid_address')
+}
+```
+
 ### Permission Gating
 
 ```javascript
@@ -863,10 +1052,14 @@ try {
   target neighborhood, proximity) derivation plus mining algorithm and search
   order, so the same topic converges on the same address across *independent*
   provider implementations, not only within one. Until then, cross-provider
-  interop goes through the raw `address` parameter.
+  interop goes through the raw `address` parameter. The informative
+  [example](#gsoc-topic-derivation) is a candidate starting point, minus its
+  vendor-specific context string.
+- **Per-origin PSS keys** everywhere, once nodes can decrypt PSS with keys other
+  than their own, or hand providers the raw trojan chunks.
 - **Mid-stream error signalling.** A normative way to report that an established
   subscription's pipeline has degraded/failed (a dedicated event or a
-  `message` error variant), rather than the current SHOULD-document approach.
+  `message` error variant), rather than the current SHOULD-reconnect approach.
 - **Delivery/ack extensions for PSS.** Optional application-visible send
   acknowledgement where the underlying primitive can support it.
 - **Presence/awareness helpers.** A higher-level convention for ephemeral
@@ -890,6 +1083,18 @@ gateway endpoints equivalent to:
 The provider is responsible for translating the ergonomic, consent-gated,
 origin-scoped method surface above onto whatever node interface it drives; these
 endpoints are named only to ground the mapping.
+
+## Implementation
+
+[Freedom Browser](https://github.com/solardev-xyz/freedom-browser) implements
+this extension on the [Ant](https://github.com/freedom-hq/ant) light node; see
+[`docs/swarm-provider-api.md`](https://github.com/solardev-xyz/freedom-browser/blob/main/docs/swarm-provider-api.md)
+and [`src/main/swarm/messaging-service.js`](https://github.com/solardev-xyz/freedom-browser/blob/main/src/main/swarm/messaging-service.js).
+It uses the node's PSS key (`identityMode: "bee-wallet"`) and says so in its
+messaging prompt; the resulting exposure is tracked as
+[#1156](https://github.com/solardev-xyz/freedom-browser/issues/1156). Making
+`swarm_unsubscribe` idempotent and refusing `history` until the mailbox ships
+are tracked as [#1157](https://github.com/solardev-xyz/freedom-browser/issues/1157).
 
 ## Copyright
 
