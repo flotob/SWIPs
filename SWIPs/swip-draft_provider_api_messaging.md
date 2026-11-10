@@ -346,6 +346,10 @@ permanent refusal.
   delivering decoded payloads via the `message` event. The call resolves once
   the node has accepted the subscription; implementations MAY bound that wait
   and fail with `establish_timeout`.
+- **Listener first.** Messages, recovered mailbox messages in particular, MAY
+  reach the page before `swarm_subscribe` resolves. Pages SHOULD attach their
+  `message` listener before subscribing, and match `subscription` once they
+  have the id.
 - **History.** The mailbox is OPTIONAL. An implementation that does not offer
   it MUST reject `history: true` with `-32602`, `data.reason =
   "unsupported_option"` and `data.option = "history"`, so a page can tell it
@@ -402,7 +406,10 @@ state and catch-up, with messaging used for live propagation.
 
 **With `history: true` (mailbox):** an implementation that supports the mailbox
 additionally delivers, on subscribe, messages that arrived before the
-subscription — offline delivery. This is **bounded and best-effort**, not a
+subscription — offline delivery. The node typically sends the recovered
+messages as soon as the subscription opens, while it is still being
+established; an implementation MUST NOT drop them for that reason, but hold
+them and deliver them once the subscription is established. This is **bounded and best-effort**, not a
 durable queue: recovery is limited by (a) storer **retention** — a message
 whose postage stamp has expired, or that has been evicted from neighborhood
 reserves, is unrecoverable; and (b) an **implementation-defined lookback
@@ -1075,7 +1082,7 @@ gateway endpoints equivalent to:
 - `POST /pss/send/{topic}/{targets}` (+ recipient key) — backs `swarm_sendPss`
 - `POST /soc/{owner}/{id}` with mined owner/id — backs `swarm_sendGsoc`
 - `GET /gsoc/subscribe/{address}` (streaming) — backs `swarm_subscribe` (gsoc)
-- `GET /pss/subscribe/{topic}` (streaming) — backs `swarm_subscribe` (pss)
+- `GET /pss/subscribe/{topic}` (streaming; `?history=true` for the mailbox) — backs `swarm_subscribe` (pss)
 - `GET /addresses` reporting `pssPublicKey`/overlay — backs `swarm_getMessagingIdentity`
   (the provider truncates the overlay to the `pssTarget` prefix; the full
   overlay never crosses the page boundary)
@@ -1092,9 +1099,14 @@ this extension on the [Ant](https://github.com/freedom-hq/ant) light node; see
 and [`src/main/swarm/messaging-service.js`](https://github.com/solardev-xyz/freedom-browser/blob/main/src/main/swarm/messaging-service.js).
 It uses the node's PSS key (`identityMode: "bee-wallet"`) and says so in its
 messaging prompt; the resulting exposure is tracked as
-[#1156](https://github.com/solardev-xyz/freedom-browser/issues/1156). Making
-`swarm_unsubscribe` idempotent and refusing `history` until the mailbox ships
-are tracked as [#1157](https://github.com/solardev-xyz/freedom-browser/issues/1157).
+[#1156](https://github.com/solardev-xyz/freedom-browser/issues/1156), and
+per-site PSS keys wait on a node change
+([freedom-hq/ant#254](https://github.com/freedom-hq/ant/issues/254)). The
+mailbox comes from Ant's `?history=true` (Ant v0.5.50 and later); Freedom
+refuses `history` with `unsupported_option` on a node it does not run itself,
+which may lack it. That support and an idempotent `swarm_unsubscribe` are in
+[PR #1162](https://github.com/solardev-xyz/freedom-browser/pull/1162)
+([#1157](https://github.com/solardev-xyz/freedom-browser/issues/1157)).
 
 ## Copyright
 
