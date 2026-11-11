@@ -562,6 +562,8 @@ Exactly one of `topic` or `name` MUST be provided (otherwise `invalid_params`):
 }
 ```
 
+**`data`** is the entry's payload as its writer stored it, the same bytes whether the entry is read as the latest entry or at its `index`. A payload that `swarm_writeFeedEntry` wrapped because it was larger than one chunk is returned whole, as it was written. Otherwise, implementations MUST NOT return content the payload refers to in its place. In particular, an entry that holds a reference, such as one written by `swarm_updateFeed` (an 8-byte big-endian timestamp followed by the 32-byte reference), is returned as those 40 bytes, although the node's feed lookup (`GET /feeds/{owner}/{topic}`) answers with the content the reference points to. An implementation that uses the lookup to find the latest entry therefore takes only the index from it and reads the entry at that index (see [When to use which endpoint](#when-to-use-which-endpoint)). Callers read the referenced content with `swarm_readData`.
+
 **`nextIndex`** is the index after the one returned. For a latest-entry read it is the next index as the node reports it, which on a contiguous feed is the index the next append will use; it MAY be `null` if the node does not report one. On a feed written with sparse explicit indexes, the node's lookup can stop at a gap (see [Implementation Note](#implementation-note-exact-match-feed-reads)), so a latest-entry read MAY return an older entry, and a `nextIndex` that is not the end of the feed: treat both as hints there. For an explicit-index read it is `index + 1` whether or not that slot is taken — it is NOT the next free index. It MUST be `null` where the next index would exceed `Number.MAX_SAFE_INTEGER`. To append, use `swarm_writeFeedEntry` without `index`, or read the latest entry first.
 
 **Errors:** `4900` if node unreachable (`node-stopped`). `-32602` for `invalid_topic`, `invalid_owner`, `invalid_feed_name`, `invalid_params`, `feed_not_found`, `feed_empty`, `entry_not_found`, or `rate_limited`. Notably does NOT return `4100` — no permission is required to call this method.
@@ -834,7 +836,7 @@ This method is in the **signing permission tier**: the returned address is the d
 
 ### Implementation Note: Exact-Match Feed Reads
 
-This section is **informative**. It documents a Bee API behavior that affects the correctness of `swarm_writeFeedEntry`'s overwrite protection and `swarm_readFeedEntry`'s explicit-index path.
+This section is **informative**. It documents a Bee API behavior that affects the correctness of `swarm_writeFeedEntry`'s overwrite protection and of both `swarm_readFeedEntry` paths.
 
 #### The problem
 
@@ -863,16 +865,16 @@ A 404 from `GET /chunks/{socAddress}` means no entry exists at the exact request
 
 #### When to use which endpoint
 
-The latest-entry read path is what the lookup is for: `GET /feeds/{owner}/{topic}` returns the latest entry plus the `swarm-feed-index` and `swarm-feed-index-next` response headers (`%016x`) that drive auto-increment. Because the search can stop at a gap, "latest" is reliable only on a contiguous feed; journals that need it SHOULD write with auto-increment rather than sparse explicit indexes.
+Finding the latest entry is what the lookup is for: `GET /feeds/{owner}/{topic}` names it in the `swarm-feed-index` and `swarm-feed-index-next` response headers (`%016x`) that drive auto-increment. Its body is not always that entry: for an entry that holds a reference, the node serves the content the reference points to (see `data` under `swarm_readFeedEntry`). So a latest-entry read takes the index from the lookup and reads the entry at that index by address; sending `Swarm-Only-Root-Chunk: true` keeps the node from streaming content the read does not use. Because the search can stop at a gap, "latest" is reliable only on a contiguous feed; journals that need it SHOULD write with auto-increment rather than sparse explicit indexes.
 
 | Operation | Endpoint | Semantics |
 |---|---|---|
-| `swarm_readFeedEntry` (no `index`) — latest entry + `nextIndex` | `GET /feeds/{owner}/{topic}` | Latest entry |
-| `swarm_writeFeedEntry` auto-increment — find next writable index | `GET /feeds/{owner}/{topic}` | Latest entry |
+| `swarm_readFeedEntry` (no `index`) — latest entry + `nextIndex` | `GET /feeds/{owner}/{topic}`, then `GET /chunks/{socAddress}` | Latest index, then exact-match |
+| `swarm_writeFeedEntry` auto-increment — find next writable index | `GET /feeds/{owner}/{topic}` | Latest index |
 | `swarm_readFeedEntry` with explicit `index` | `GET /chunks/{socAddress}` | Exact-match |
 | `swarm_writeFeedEntry` overwrite probe | `GET /chunks/{socAddress}` | Exact-match |
 
-If `GET /feeds/{owner}/{topic}` cannot answer for a feed that has entries (some nodes fail the lookup once the latest entry's chunk has expired), an implementation MAY find the next index by probing entries directly by address.
+If `GET /feeds/{owner}/{topic}` cannot answer for a feed that has entries (some nodes fail the lookup once the content the latest entry refers to has expired), an implementation MAY find the latest and next index by probing entries directly by address, stepping as the lookup does (1, 2, 4, … past the highest index found, then bisecting) so that it reads a sparse feed as the node would.
 
 #### Endianness trap
 
