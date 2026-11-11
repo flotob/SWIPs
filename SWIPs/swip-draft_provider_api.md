@@ -184,12 +184,14 @@ Implementations SHOULD include a `data.reason` string on every `4100` and `-3260
 
 | Reason | Meaning |
 |---|---|
-| `node-stopped` | The node is not running or does not answer. |
-| `node-not-ready` | The node is running but not ready to write (still syncing or connecting, or a postage batch is not yet usable). |
+| `node-stopped` | The node is off, has failed, or does not answer. |
+| `node-not-ready` | The node is starting or restarting, or is running but not ready to write (still syncing or connecting, or a postage batch is not yet usable). |
 | `ultra-light-mode` | The node runs in ultra-light mode and cannot write. |
 | `no-usable-stamps` | No postage batch has room for the write. |
 
-Permission-free reads only ever report `node-stopped`. A `4900` without `data.reason` means the provider is turned off, or a permission manifest the origin depends on could not be read (see [Permission Manifests](#permission-manifests)).
+Permission-free reads report only `node-stopped` and `node-not-ready`. A `4900` without `data.reason` means the provider is turned off, or a permission manifest the origin depends on could not be read (see [Permission Manifests](#permission-manifests)).
+
+When the implementation itself starts, stops or restarts the node (for example to give it a new identity), it SHOULD hold calls made meanwhile until the node is back, for a bounded time, rather than fail them with `node-stopped`. A call still waiting when that time is up fails with `node-not-ready`. `swarm_getCapabilities` SHOULD NOT wait: it reports `node-not-ready` until the node is back.
 
 **`-32602` reasons:**
 
@@ -290,9 +292,9 @@ Returns the current capabilities of the provider for this origin. Does NOT requi
 | Code | Meaning |
 |---|---|
 | `"not-connected"` | Origin has not called `swarm_requestAccess`. Reported whenever the origin is not connected, whatever the node's state. |
-| `"node-stopped"` | Node is not running. |
+| `"node-stopped"` | Node is off, has failed, or does not answer. |
 | `"ultra-light-mode"` | Node is in ultra-light mode (browse only, cannot publish). |
-| `"node-not-ready"` | Node is running but not yet ready to write. |
+| `"node-not-ready"` | Node is starting or restarting, or is running but not yet ready to write. |
 | `"no-usable-stamps"` | No postage stamps with remaining capacity. |
 
 **`specVersion`:** The version of this specification that the provider implements. This SWIP defines version `"1.0"`. Implementations SHOULD return this field regardless of whether the origin has called `swarm_requestAccess`.
@@ -566,7 +568,7 @@ Exactly one of `topic` or `name` MUST be provided (otherwise `invalid_params`):
 
 **`nextIndex`** is the index after the one returned. For a latest-entry read it is the next index as the node reports it, which on a contiguous feed is the index the next append will use; it MAY be `null` if the node does not report one. On a feed written with sparse explicit indexes, the node's lookup can stop at a gap (see [Implementation Note](#implementation-note-exact-match-feed-reads)), so a latest-entry read MAY return an older entry, and a `nextIndex` that is not the end of the feed: treat both as hints there. For an explicit-index read it is `index + 1` whether or not that slot is taken — it is NOT the next free index. It MUST be `null` where the next index would exceed `Number.MAX_SAFE_INTEGER`. To append, use `swarm_writeFeedEntry` without `index`, or read the latest entry first.
 
-**Errors:** `4900` if node unreachable (`node-stopped`). `-32602` for `invalid_topic`, `invalid_owner`, `invalid_feed_name`, `invalid_params`, `feed_not_found`, `feed_empty`, `entry_not_found`, or `rate_limited`. Notably does NOT return `4100` — no permission is required to call this method.
+**Errors:** `4900` if node unreachable (`node-stopped`) or still starting (`node-not-ready`). `-32602` for `invalid_topic`, `invalid_owner`, `invalid_feed_name`, `invalid_params`, `feed_not_found`, `feed_empty`, `entry_not_found`, or `rate_limited`. Notably does NOT return `4100` — no permission is required to call this method.
 
 **Behavior:**
 
